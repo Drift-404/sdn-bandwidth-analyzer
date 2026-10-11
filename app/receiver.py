@@ -26,6 +26,7 @@ def receive_traffic(host, port, duration, summary_wait):
     malformed_packets = 0
 
     first_packet_time = None
+    last_packet_time = None
     data_deadline = None
     final_deadline = None
 
@@ -95,6 +96,7 @@ def receive_traffic(host, port, duration, summary_wait):
             packets_received[sender_id] += 1
             bytes_received[sender_id] += len(packet)
             sequences_seen[sender_id].add(sequence)
+            last_packet_time = time.monotonic()
 
     if first_packet_time is None:
         print("\nNo valid traffic was received.")
@@ -102,6 +104,12 @@ def receive_traffic(host, port, duration, summary_wait):
         return
 
     elapsed = time.monotonic() - first_packet_time
+    data_elapsed = (
+        last_packet_time - first_packet_time
+        if last_packet_time is not None
+        else 0.0
+    )
+
     total_packets = sum(packets_received.values())
     total_bytes = sum(bytes_received.values())
 
@@ -115,10 +123,20 @@ def receive_traffic(host, port, duration, summary_wait):
 
     if duration > 0:
         print(
-            "Receive throughput: "
+            "Receive throughput (configured window): "
             f"{total_bytes * 8 / duration:.2f} bits/s"
         )
 
+    if data_elapsed > 0:
+        print(
+            "Receive throughput (packet arrival interval): "
+            f"{total_bytes * 8 / data_elapsed:.2f} bits/s"
+        )
+    else:
+        print(
+            "Receive throughput (packet arrival interval): "
+            "N/A (insufficient packet timing data)"
+        )
     for sender_id in sorted(
         set(packets_received) | set(summaries)
     ):

@@ -1,0 +1,10 @@
+timestamp_utc,rate_pps,trial,packet_size_bytes,sender_duration_s,receiver_window_s,packets_sent,sender_bytes,actual_packet_rate_pps,sender_throughput_bps,packets_received,receiver_bytes,receiver_throughput_window_bps,receiver_throughput_interval_bps,packet_loss_pct,malformed_packets,openflow_packet_delta,openflow_byte_delta,sender_log,receiver_log
+2026-10-11T17:02:31.781902+00:00,25,1,1024,3,5,75,76800,22.94,187937.62,75,76800,122880.0,204957.01,0.0,0,79,80217,results/raw/rate_25_trial_1_sender.log,results/raw/rate_25_trial_1_receiver.log
+2026-10-11T17:02:39.416308+00:00,25,2,1024,3,5,75,76800,23.32,191006.95,75,76800,122880.0,207463.83,0.0,0,78,80175,results/raw/rate_25_trial_2_sender.log,results/raw/rate_25_trial_2_receiver.log
+2026-10-11T17:02:47.092005+00:00,25,3,1024,3,5,75,76800,23.33,191083.21,75,76800,122880.0,206802.15,0.0,0,78,80175,results/raw/rate_25_trial_3_sender.log,results/raw/rate_25_trial_3_receiver.log
+2026-10-11T17:02:54.824690+00:00,50,1,1024,3,5,142,145408,44.1,361285.42,142,145408,232652.8,389459.4,0.0,0,145,151597,results/raw/rate_50_trial_1_sender.log,results/raw/rate_50_trial_1_receiver.log
+2026-10-11T17:03:02.529147+00:00,50,2,1024,3,5,148,151552,46.1,377635.27,148,151552,242483.2,403823.21,0.0,0,151,157993,results/raw/rate_50_trial_2_sender.log,results/raw/rate_50_trial_2_receiver.log
+2026-10-11T17:03:10.202273+00:00,50,3,1024,3,5,150,153600,46.57,381534.9,150,153600,245760.0,409989.6,0.0,0,153,160125,results/raw/rate_50_trial_3_sender.log,results/raw/rate_50_trial_3_receiver.log
+2026-10-11T17:03:17.920192+00:00,100,1,1024,3,5,295,302080,92.05,754043.29,295,302080,483328.0,807606.28,0.0,0,299,314737,results/raw/rate_100_trial_1_sender.log,results/raw/rate_100_trial_1_receiver.log
+2026-10-11T17:03:25.710567+00:00,100,2,1024,3,5,288,294912,89.56,733674.72,288,294912,471859.2,787847.24,0.0,0,291,307233,results/raw/rate_100_trial_2_sender.log,results/raw/rate_100_trial_2_receiver.log
+2026-10-11T17:03:33.434470+00:00,100,3,1024,3,5,290,296960,90.25,739363.32,290,296960,475136.0,793925.22,0.0,0,293,309365,results/raw/rate_100_trial_3_sender.log,results/raw/rate_100_trial_3_receiver.log
