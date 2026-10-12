@@ -1,0 +1,2 @@
+timestamp_utc,rate_pps,trial,packet_size_bytes,sender_duration_s,receiver_window_s,packets_sent,sender_bytes,actual_packet_rate_pps,sender_throughput_bps,packets_received,receiver_bytes,receiver_throughput_window_bps,receiver_throughput_interval_bps,packet_loss_pct,malformed_packets,openflow_packet_delta,openflow_byte_delta,sender_log,receiver_log
+2026-10-12T11:58:59.207627+00:00,25,1,1024,3,5,75,76800,23.37,191467.35,75,76800,122880.0,207509.32,0.0,0,79,80217,results/raw/rate_25_trial_1_sender.log,results/raw/rate_25_trial_1_receiver.log
