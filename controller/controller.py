@@ -1,13 +1,14 @@
 import sys
 from pathlib import Path
 
-# Add the project root to Python's module search path.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.flow_stats import FlowStatsTracker
+from app.congestion import CongestionPolicy
+
 from os_ken.base import app_manager
 from os_ken.controller import ofp_event
 from os_ken.controller.handler import (
@@ -20,15 +21,31 @@ from os_ken.lib import hub
 
 
 class BandwidthController(app_manager.OSKenApp):
-    """Learning-switch controller with periodic flow statistics."""
+    """Learning switch with flow monitoring and congestion control."""
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
+    # Current single-switch topology: h1 -> s1 -> h2
+    TARGET_IN_PORT = 1
+    TARGET_DST_MAC = "00:00:00:00:00:02"
+    TARGET_OUT_PORT = 2
+
+    METER_ID = 1
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
         self.mac_to_port = {}
         self.datapaths = {}
+
         self.stats_tracker = FlowStatsTracker()
+
+        # One independent congestion policy per switch.
+        self.congestion_policies = {}
+
+        # Tracks which switches currently have our meter installed.
+        self.active_meters = set()
+
         self.monitor_thread = hub.spawn(self._monitor)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -38,6 +55,7 @@ class BandwidthController(app_manager.OSKenApp):
         ofproto = datapath.ofproto
 
         self.datapaths[datapath.id] = datapath
+        self.congestion_policies[datapath.id] = CongestionPolicy()
 
         # Send unmatched packets to the controller.
         match = parser.OFPMatch()
@@ -47,6 +65,7 @@ class BandwidthController(app_manager.OSKenApp):
                 ofproto.OFPCML_NO_BUFFER,
             )
         ]
+
         self._add_flow(datapath, 0, match, actions)
 
         self.logger.info(
@@ -71,8 +90,133 @@ class BandwidthController(app_manager.OSKenApp):
             match=match,
             instructions=instructions,
         )
+
         datapath.send_msg(flow_mod)
 
+    def _is_target_flow(self, stat):
+        """Return True only for the h1 -> h2 forwarding rule."""
+
+        return (
+            stat.priority == 10
+            and stat.match.get("in_port") == self.TARGET_IN_PORT
+            and str(stat.match.get("eth_dst", "")).lower()
+            == self.TARGET_DST_MAC
+        )
+
+    def _modify_target_flow(self, datapath, meter_id=None):
+        """Modify the h1 -> h2 rule with or without a meter."""
+
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        match = parser.OFPMatch(
+            in_port=self.TARGET_IN_PORT,
+            eth_dst=self.TARGET_DST_MAC,
+        )
+
+        actions = [
+            parser.OFPActionOutput(self.TARGET_OUT_PORT)
+        ]
+
+        instructions = []
+
+        # OpenFlow meter instruction must precede apply-actions.
+        if meter_id is not None:
+            instructions.append(
+                parser.OFPInstructionMeter(meter_id)
+            )
+
+        instructions.append(
+            parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions,
+            )
+        )
+
+        flow_mod = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_MODIFY_STRICT,
+            table_id=0,
+            priority=10,
+            match=match,
+            instructions=instructions,
+        )
+
+        datapath.send_msg(flow_mod)
+
+    def _install_meter(self, datapath):
+        """Install a 100 kbps DROP meter and attach it to h1 -> h2."""
+
+        dpid = datapath.id
+
+        if dpid in self.active_meters:
+            return
+
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        band = parser.OFPMeterBandDrop(
+            rate=100,
+            burst_size=20,
+        )
+
+        meter_mod = parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofproto.OFPMC_ADD,
+            flags=(
+                ofproto.OFPMF_KBPS
+                | ofproto.OFPMF_BURST
+            ),
+            meter_id=self.METER_ID,
+            bands=[band],
+        )
+
+        # Install the meter before referencing it in the flow.
+        datapath.send_msg(meter_mod)
+
+        self._modify_target_flow(
+            datapath,
+            meter_id=self.METER_ID,
+        )
+
+        self.active_meters.add(dpid)
+
+        self.logger.warning(
+            "CONGESTION_ACTION switch=%s "
+            "action=ACTIVATE_METER rate=100 kbps",
+            dpid,
+        )
+
+    def _remove_meter(self, datapath):
+        """Restore normal forwarding and remove the meter."""
+
+        dpid = datapath.id
+
+        if dpid not in self.active_meters:
+            return
+
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
+        # Restore the original unmetered forwarding rule first.
+        self._modify_target_flow(datapath)
+
+        meter_mod = parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofproto.OFPMC_DELETE,
+            flags=0,
+            meter_id=self.METER_ID,
+            bands=[],
+        )
+
+        datapath.send_msg(meter_mod)
+
+        self.active_meters.discard(dpid)
+
+        self.logger.warning(
+            "CONGESTION_ACTION switch=%s action=REMOVE_METER",
+            dpid,
+        )
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
@@ -84,17 +228,17 @@ class BandwidthController(app_manager.OSKenApp):
         in_port = msg.match["in_port"]
         dpid = datapath.id
 
-        # Ignore packets that are too short to contain an Ethernet header.
         if len(msg.data) < 14:
             return
 
-        # Convert binary MAC addresses to OS-Ken-compatible strings.
-        dst_mac = ":".join(f"{b:02x}" for b in msg.data[0:6])
-        src_mac = ":".join(f"{b:02x}" for b in msg.data[6:12])
+        dst_mac = ":".join(
+            f"{b:02x}" for b in msg.data[0:6]
+        )
+        src_mac = ":".join(
+            f"{b:02x}" for b in msg.data[6:12]
+        )
 
         self.mac_to_port.setdefault(dpid, {})
-
-        # Learn the source MAC address and its ingress port.
         self.mac_to_port[dpid][src_mac] = in_port
 
         out_port = self.mac_to_port[dpid].get(
@@ -104,15 +248,31 @@ class BandwidthController(app_manager.OSKenApp):
 
         actions = [parser.OFPActionOutput(out_port)]
 
-        # Install a forwarding rule when the destination is known.
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(
                 in_port=in_port,
                 eth_dst=dst_mac,
             )
-            self._add_flow(datapath, 10, match, actions)
+
+            if (
+                in_port == self.TARGET_IN_PORT
+                and dst_mac == self.TARGET_DST_MAC
+                and dpid in self.active_meters
+            ):
+                self._modify_target_flow(
+                    datapath,
+                    meter_id=self.METER_ID,
+                )
+            else:
+                self._add_flow(
+                    datapath,
+                    10,
+                    match,
+                    actions,
+                )
 
         data = None
+
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
 
@@ -123,12 +283,16 @@ class BandwidthController(app_manager.OSKenApp):
             actions=actions,
             data=data,
         )
+
         datapath.send_msg(packet_out)
 
-
-    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER])
+    @set_ev_cls(
+        ofp_event.EventOFPStateChange,
+        [MAIN_DISPATCHER],
+    )
     def state_change_handler(self, ev):
         datapath = ev.datapath
+
         if ev.state == MAIN_DISPATCHER:
             self.datapaths[datapath.id] = datapath
 
@@ -148,24 +312,30 @@ class BandwidthController(app_manager.OSKenApp):
                     0,
                     parser.OFPMatch(),
                 )
+
                 datapath.send_msg(request)
 
             hub.sleep(5)
 
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    @set_ev_cls(
+        ofp_event.EventOFPFlowStatsReply,
+        MAIN_DISPATCHER,
+    )
     def flow_stats_reply_handler(self, ev):
         datapath = ev.msg.datapath
+        dpid = datapath.id
+
+        policy = self.congestion_policies.get(dpid)
 
         for stat in ev.msg.body:
             if stat.priority == 0:
                 continue
 
             result = self.stats_tracker.update(
-                datapath.id,
+                dpid,
                 stat,
             )
 
-            # First sample establishes the baseline.
             if result is None:
                 continue
 
@@ -182,3 +352,16 @@ class BandwidthController(app_manager.OSKenApp):
                 result["throughput_kbps"],
                 result["match"],
             )
+
+            if policy is None or not self._is_target_flow(stat):
+                continue
+
+            decision = policy.evaluate(
+                result["throughput_kbps"]
+            )
+
+            if decision == "activate":
+                self._install_meter(datapath)
+
+            elif decision == "deactivate":
+                self._remove_meter(datapath)
