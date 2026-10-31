@@ -1,4 +1,13 @@
+import sys
+from pathlib import Path
 
+# Add the project root to Python's module search path.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.flow_stats import FlowStatsTracker
 from os_ken.base import app_manager
 from os_ken.controller import ofp_event
 from os_ken.controller.handler import (
@@ -19,6 +28,7 @@ class BandwidthController(app_manager.OSKenApp):
         super().__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.datapaths = {}
+        self.stats_tracker = FlowStatsTracker()
         self.monitor_thread = hub.spawn(self._monitor)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -150,14 +160,25 @@ class BandwidthController(app_manager.OSKenApp):
             if stat.priority == 0:
                 continue
 
-            self.logger.info(
-                "FLOW_STATS switch=%s packets=%s bytes=%s "
-                "duration=%s.%09d priority=%s match=%s",
+            result = self.stats_tracker.update(
                 datapath.id,
-                stat.packet_count,
-                stat.byte_count,
-                stat.duration_sec,
-                stat.duration_nsec,
-                stat.priority,
-                stat.match,
+                stat,
+            )
+
+            # First sample establishes the baseline.
+            if result is None:
+                continue
+
+            self.logger.info(
+                "FLOW_RATE switch=%s priority=%s "
+                "packets=%s bytes=%s "
+                "packet_rate=%.2f pps throughput=%.2f kbps "
+                "match=%s",
+                result["switch_id"],
+                result["priority"],
+                result["packet_delta"],
+                result["byte_delta"],
+                result["packet_rate_pps"],
+                result["throughput_kbps"],
+                result["match"],
             )
