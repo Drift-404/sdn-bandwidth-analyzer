@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -25,12 +26,16 @@ class BandwidthController(app_manager.OSKenApp):
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
-    # Current single-switch topology: h1 -> s1 -> h2
-    TARGET_IN_PORT = 1
-    TARGET_DST_MAC = "00:00:00:00:00:02"
-    TARGET_OUT_PORT = 2
+    # D2 target: h3 -> h4 through s1
+    TARGET_SWITCH_ID = 1
+    TARGET_IN_PORT = 2
+    TARGET_DST_MAC = "00:00:00:00:00:04"
+    TARGET_OUT_PORT = 3
 
     METER_ID = 1
+    ENABLE_DYNAMIC_METERING = (
+        os.getenv("SDN_DYNAMIC_METERING", "1").strip() == "1"
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -55,7 +60,10 @@ class BandwidthController(app_manager.OSKenApp):
         ofproto = datapath.ofproto
 
         self.datapaths[datapath.id] = datapath
-        self.congestion_policies[datapath.id] = CongestionPolicy()
+        self.congestion_policies[datapath.id] = CongestionPolicy(
+            meter_rate_kbps=500,
+            min_hold_seconds=15,
+        )
 
         # Send unmatched packets to the controller.
         match = parser.OFPMatch()
@@ -94,7 +102,7 @@ class BandwidthController(app_manager.OSKenApp):
         datapath.send_msg(flow_mod)
 
     def _is_target_flow(self, stat):
-        """Return True only for the h1 -> h2 forwarding rule."""
+        """Identify the h3 -> h4 forwarding rule on s1."""
 
         return (
             stat.priority == 10
@@ -102,9 +110,8 @@ class BandwidthController(app_manager.OSKenApp):
             and str(stat.match.get("eth_dst", "")).lower()
             == self.TARGET_DST_MAC
         )
-
     def _modify_target_flow(self, datapath, meter_id=None):
-        """Modify the h1 -> h2 rule with or without a meter."""
+        """Modify the h3 -> h4 rule with or without a meter."""
 
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
@@ -145,9 +152,12 @@ class BandwidthController(app_manager.OSKenApp):
         datapath.send_msg(flow_mod)
 
     def _install_meter(self, datapath):
-        """Install a 100 kbps DROP meter and attach it to h1 -> h2."""
+        """Install a configured DROP meter and attach it to h3 -> h4."""
 
         dpid = datapath.id
+
+        if dpid != self.TARGET_SWITCH_ID:
+            return
 
         if dpid in self.active_meters:
             return
@@ -155,9 +165,12 @@ class BandwidthController(app_manager.OSKenApp):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
+        policy = self.congestion_policies[dpid]
+        meter_rate = policy.meter_rate_kbps
+
         band = parser.OFPMeterBandDrop(
-            rate=100,
-            burst_size=20,
+            rate=meter_rate,
+            burst_size=100,
         )
 
         meter_mod = parser.OFPMeterMod(
@@ -171,7 +184,6 @@ class BandwidthController(app_manager.OSKenApp):
             bands=[band],
         )
 
-        # Install the meter before referencing it in the flow.
         datapath.send_msg(meter_mod)
 
         self._modify_target_flow(
@@ -183,12 +195,13 @@ class BandwidthController(app_manager.OSKenApp):
 
         self.logger.warning(
             "CONGESTION_ACTION switch=%s "
-            "action=ACTIVATE_METER rate=100 kbps",
+            "action=ACTIVATE_METER rate=%s kbps",
             dpid,
+            meter_rate,
         )
 
     def _remove_meter(self, datapath):
-        """Restore normal forwarding and remove the meter."""
+        """Restore normal forwarding and remove the h3 -> h4 meter."""
 
         dpid = datapath.id
 
@@ -255,7 +268,8 @@ class BandwidthController(app_manager.OSKenApp):
             )
 
             if (
-                in_port == self.TARGET_IN_PORT
+                dpid == self.TARGET_SWITCH_ID
+                and in_port == self.TARGET_IN_PORT
                 and dst_mac == self.TARGET_DST_MAC
                 and dpid in self.active_meters
             ):
@@ -353,7 +367,12 @@ class BandwidthController(app_manager.OSKenApp):
                 result["match"],
             )
 
-            if policy is None or not self._is_target_flow(stat):
+            if (
+                not self.ENABLE_DYNAMIC_METERING
+                or dpid != self.TARGET_SWITCH_ID
+                or policy is None
+                or not self._is_target_flow(stat)
+            ):
                 continue
 
             decision = policy.evaluate(
